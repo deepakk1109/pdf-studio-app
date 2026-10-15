@@ -23,12 +23,12 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt
 
 COPY pdf_studio.py .
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+
+# auto-launch the app inside the webtop desktop using openbox autostart
+RUN mkdir -p /config/.config/openbox && \
+    echo "python3 /app/pdf_studio.py &" >> /config/.config/openbox/autostart
 
 EXPOSE 3000
-
-ENTRYPOINT ["/entrypoint.sh"]
 
 # # FROM linuxserver/webtop:ubuntu-openbox
 
