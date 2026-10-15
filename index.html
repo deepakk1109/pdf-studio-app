@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PDF Studio Web</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/downloadjs@1.4.7"></script>
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #525659; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    #toolbar { background: #323639; color: white; padding: 10px 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; box-shadow: 0 2px 5px rgba(0,0,0,0.3); }
+    #toolbar button, #toolbar input { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    #toolbar button { background: #007acc; color: white; font-weight: bold; }
+    #toolbar button:hover { background: #005999; }
+    .active-tool { outline: 2px solid #ffcc00; background: #e68a00 !important; }
+    #viewer-container { flex: 1; overflow: auto; display: flex; justify-content: center; padding: 20px; }
+    #canvas-wrapper { position: relative; box-shadow: 0 4px 10px rgba(0,0,0,0.5); background: white; }
+    canvas { display: block; }
+    #draw-layer { position: absolute; top: 0; left: 0; cursor: crosshair; }
+  </style>
+</head>
+<body>
+
+  <div id="toolbar">
+    <input type="file" id="pdf-file" accept="application/pdf">
+    <button id="prev-page">Prev</button>
+    <span id="page-num">0 / 0</span>
+    <button id="next-page">Next</button>
+    
+    <button id="btn-draw" onclick="setMode('draw')">Draw / Pen</button>
+    <button id="btn-text" onclick="setMode('text')">Add Text</button>
+    <button id="btn-stamp" onclick="setMode('stamp')">Stamp APPROVED</button>
+    
+    <label>Color: <input type="color" id="draw-color" value="#ff0000"></label>
+    <label>Size: <input type="number" id="brush-size" value="3" min="1" max="20" style="width: 50px;"></label>
+    
+    <button style="background: #28a745; margin-left: auto;" onclick="downloadModifiedPDF()">Save & Download</button>
+  </div>
+
+  <div id="viewer-container">
+    <div id="canvas-wrapper">
+      <canvas id="pdf-render"></canvas>
+      <canvas id="draw-layer"></canvas>
+    </div>
+  </div>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+    let pdfDoc = null;
+    let pageNum = 1;
+    let pdfBytes = null;
+    let currentMode = null;
+    let isDrawing = false;
+    let userModifications = [];
+
+    const pdfCanvas = document.getElementById("pdf-render");
+    const pdfCtx = pdfCanvas.getContext("2d");
+    const drawCanvas = document.getElementById("draw-layer");
+    const drawCtx = drawCanvas.getContext("2d");
+
+    document.getElementById("pdf-file").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      pdfBytes = await file.arrayBuffer();
+      const loadingTask = pdfjsLib.getDocument({ data: pdfBytes.slice(0) });
+      pdfDoc = await loadingTask.promise;
+      pageNum = 1;
+      renderPage(pageNum);
+    });
+
+    async function renderPage(num) {
+      const page = await pdfDoc.getPage(num);
+      const viewport = page.getViewport({ scale: 1.3 });
+
+      pdfCanvas.height = viewport.height;
+      pdfCanvas.width = viewport.width;
+      drawCanvas.height = viewport.height;
+      drawCanvas.width = viewport.width;
+
+      document.getElementById("canvas-wrapper").style.width = viewport.width + "px";
+      document.getElementById("canvas-wrapper").style.height = viewport.height + "px";
+
+      await page.render({ canvasContext: pdfCtx, viewport: viewport }).promise;
+      document.getElementById("page-num").textContent = `${num} / ${pdfDoc.numPages}`;
+      redrawCurrentPageModifications();
+    }
+
+    document.getElementById("prev-page").onclick = () => {
+      if (pageNum <= 1) return;
+      pageNum--;
+      renderPage(pageNum);
+    };
+
+    document.getElementById("next-page").onclick = () => {
+      if (pageNum >= pdfDoc.numPages) return;
+      pageNum++;
+      renderPage(pageNum);
+    };
+
+    function setMode(mode) {
+      currentMode = currentMode === mode ? null : mode;
+      document.querySelectorAll("#toolbar button").forEach(b => b.classList.remove("active-tool"));
+      if (currentMode) {
+        const activeBtn = document.getElementById(`btn-${currentMode}`);
+        if (activeBtn) activeBtn.classList.add("active-tool");
+      }
+    }
+
+    drawCanvas.addEventListener("mousedown", (e) => {
+      const rect = drawCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      if (currentMode === "draw") {
+        isDrawing = true;
+        drawCtx.beginPath();
+        drawCtx.moveTo(x, y);
+        drawCtx.strokeStyle = document.getElementById("draw-color").value;
+        drawCtx.lineWidth = document.getElementById("brush-size").value;
+        drawCtx.lineCap = "round";
+        userModifications.push({
+          page: pageNum,
+          type: "path_start",
+          x: x / drawCanvas.width,
+          y: y / drawCanvas.height,
+          color: drawCtx.strokeStyle,
+          size: drawCtx.lineWidth
+        });
+      } else if (currentMode === "text") {
+        const text = prompt("Enter text to insert:");
+        if (text) {
+          const color = document.getElementById("draw-color").value;
+          userModifications.push({
+            page: pageNum,
+            type: "text",
+            text: text,
+            x: x / drawCanvas.width,
+            y: y / drawCanvas.height,
+            color: color,
+            size: 16
+          });
+          redrawCurrentPageModifications();
+        }
+      } else if (currentMode === "stamp") {
+        userModifications.push({
+          page: pageNum,
+          type: "stamp",
+          x: x / drawCanvas.width,
+          y: y / drawCanvas.height
+        });
+        redrawCurrentPageModifications();
+      }
+    });
+
+    drawCanvas.addEventListener("mousemove", (e) => {
+      if (!isDrawing || currentMode !== "draw") return;
+      const rect = drawCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      drawCtx.lineTo(x, y);
+      drawCtx.stroke();
+      userModifications.push({
+        page: pageNum,
+        type: "path_point",
+        x: x / drawCanvas.width,
+        y: y / drawCanvas.height
+      });
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (isDrawing) {
+        isDrawing = false;
+        userModifications.push({ page: pageNum, type: "path_end" });
+      }
+    });
+
+    function redrawCurrentPageModifications() {
+      drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      let inPath = false;
+
+      userModifications.filter(m => m.page === pageNum).forEach(m => {
+        const x = m.x * drawCanvas.width;
+        const y = m.y * drawCanvas.height;
+
+        if (m.type === "path_start") {
+          drawCtx.beginPath();
+          drawCtx.strokeStyle = m.color;
+          drawCtx.lineWidth = m.size;
+          drawCtx.lineCap = "round";
+          drawCtx.moveTo(x, y);
+          inPath = true;
+        } else if (m.type === "path_point" && inPath) {
+          drawCtx.lineTo(x, y);
+          drawCtx.stroke();
+        } else if (m.type === "path_end") {
+          inPath = false;
+        } else if (m.type === "text") {
+          drawCtx.font = "16px sans-serif";
+          drawCtx.fillStyle = m.color;
+          drawCtx.fillText(m.text, x, y);
+        } else if (m.type === "stamp") {
+          drawCtx.strokeStyle = "#008000";
+          drawCtx.lineWidth = 3;
+          drawCtx.strokeRect(x - 60, y - 20, 120, 40);
+          drawCtx.font = "bold 16px sans-serif";
+          drawCtx.fillStyle = "#008000";
+          drawCtx.textAlign = "center";
+          drawCtx.fillText("APPROVED", x, y + 6);
+          drawCtx.textAlign = "start";
+        }
+      });
+    }
+
+    async function downloadModifiedPDF() {
+      if (!pdfBytes) {
+        alert("Please load a PDF first!");
+        return;
+      }
+      const loadedPdf = await PDFLib.PDFDocument.load(pdfBytes);
+      const pages = loadedPdf.getPages();
+
+      for (const m of userModifications) {
+        const page = pages[m.page - 1];
+        const { width, height } = page.getSize();
+        const x = m.x * width;
+        const y = height - (m.y * height);
+
+        if (m.type === "text") {
+          page.drawText(m.text, {
+            x: x,
+            y: y - 12,
+            size: 14,
+            color: PDFLib.rgb(0, 0, 0)
+          });
+        } else if (m.type === "stamp") {
+          page.drawRectangle({
+            x: x - 60,
+            y: y - 20,
+            width: 120,
+            height: 40,
+            borderColor: PDFLib.rgb(0, 0.6, 0),
+            borderWidth: 2
+          });
+          page.drawText("APPROVED", {
+            x: x - 45,
+            y: y - 6,
+            size: 16,
+            color: PDFLib.rgb(0, 0.6, 0)
+          });
+        }
+      }
+
+      const modifiedPdfBytes = await loadedPdf.save();
+      download(modifiedPdfBytes, "edited_document.pdf", "application/pdf");
+    }
+  </script>
+</body>
+</html>
